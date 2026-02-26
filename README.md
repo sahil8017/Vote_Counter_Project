@@ -1,25 +1,26 @@
-# 📧 Email Blaster Project
+# 🗳️ Vote Counter Project
 
-A highly reliable, asynchronous email task processing system built with **FastAPI**, **RabbitMQ**, and **PostgreSQL**.
+A highly reliable, asynchronous vote counting system built with **FastAPI**, **RabbitMQ**, **Redis**, and **PostgreSQL**.
 
-This project provides a robust architecture for receiving email requests and processing them in the background without blocking the API response, ensuring high throughput, state tracking, and resilience.
+This project provides a robust architecture for receiving votes at high speed and processing them in the background without blocking the API response. It prevents race conditions using distributed locks, ensuring data integrity even under heavy concurrent load.
 
 ---
 
 ## 🏗 Architecture
 
-The system is composed of four main components seamlessly orchestrated with **Docker Compose**:
+The system is composed of five main components seamlessly orchestrated with **Docker Compose**:
 
-1. **The API Door (FastAPI):** Receives the incoming email requests (recipient and message). It instantly logs the request in the database as `PENDING` and pushes the task ID into a message queue.
-2. **The Messenger (RabbitMQ):** Holds the task IDs securely in a durable queue (`email_queue`) until they can be processed by a worker.
-3. **The Background Worker (Python/SQLAlchemy):** Constantly consumes messages from RabbitMQ one-by-one. It updates the database state to `PROCESSING`, simulates sending the email (heavy lifting), and finally updates the state to `COMPLETED`.
-4. **The Permanent Storage (PostgreSQL):** Safely stores all email tasks and tracks their real-time state.
+1. **The API Door (FastAPI):** Receives incoming requests to create candidates or cast votes. When a vote is cast, it instantly pushes the task into a message queue rather than processing it synchronously.
+2. **The Messenger (RabbitMQ):** Securely holds the vote tickets in a durable queue (`vote_queue`) until they can be processed by the background worker.
+3. **The Bouncer (Redis):** Provides a distributed locking mechanism (`candidate_lock_{id}`). This ensures that even with massive concurrency, only one worker can update a specific candidate's vote count at a time, completely preventing race conditions.
+4. **The Background Worker (Python/SQLAlchemy):** Concurrently consumes messages from RabbitMQ. It acquires a Redis lock for the target candidate, simulates a slow heavy-lifting process, safely increments the vote count in the database, and finally releases the lock.
+5. **The Permanent Storage (PostgreSQL):** Safely stores candidates and tracks their aggregated vote counts.
 
 <br>
 
 ## 🚀 Quick Start (Docker)
 
-The absolute easiest way to get everything running is using Docker. It automatically provisions the Database, RabbitMQ, API, and the Background Worker.
+The absolute easiest way to get everything running is using Docker. It automatically provisions the Database, RabbitMQ, Redis, API, and the Background Worker.
 
 ### 1. Build and Run
 ```bash
@@ -34,6 +35,7 @@ docker-compose up
 Once Docker is up, the following services are available:
 - **FastAPI application:** `http://localhost:8000`
 - **RabbitMQ Management Dashboard:** `http://localhost:15672`
+- **Redis Server:** `localhost:6379`
 - **PostgreSQL Database:** `localhost:5432`
 
 <br>
@@ -55,51 +57,52 @@ venv\Scripts\activate
 # 3. Install dependencies
 pip install -r requirements.txt
 ```
-*(Note: You will still need RabbitMQ and PostgreSQL running locally or via Docker, and you will need to adjust the connection strings in `app/main.py`, `app/worker.py`, and `app/database.py` if not using Docker DNS names).*
+*(Note: You will still need RabbitMQ, Redis, and PostgreSQL running locally or via Docker, and you will need to adjust the connection strings in `app/main.py`, `app/worker.py`, and `app/database.py` if not using Docker DNS names).*
 
 <br>
 
 ## 🔌 API Usage
 
-### 1. Send an Email
-You can push an email sending task to the system using the `/send-email` endpoint. 
+### 1. Setup a Test Subject
+Create a candidate who will receive the votes.
 
-**Endpoint:** `POST /send-email`
+**Endpoint:** `POST /create-candidate`
 
 **Parameters (Query):**
-- `recipient` (string) - The email address of the receiver.
-- `message` (string) - The content of the email.
+- `name` (string) - The name of the candidate.
 
 **Using cURL:**
 ```bash
-curl -X POST "http://localhost:8000/send-email?recipient=john@example.com&message=Hello%20World"
+curl -X POST "http://localhost:8000/create-candidate?name=Alice"
 ```
 
 **Expected Response:**
 ```json
 {
-  "status": "Accepted", 
-  "task_id": 1,
-  "state": "PENDING"
+  "id": 1,
+  "name": "Alice",
+  "votes": 0
 }
 ```
 
-### 2. Check Task Status
-You can check the real-time status of your email task (`PENDING`, `PROCESSING`, `COMPLETED`) using the task ID returned when you sent the email.
+### 2. The High-Speed Voter
+Push a vote casting task to the system using the `/vote` endpoint.
 
-**Endpoint:** `GET /status/{task_id}`
+**Endpoint:** `POST /vote`
+
+**Parameters (Query):**
+- `candidate_id` (integer) - The ID of the candidate you are voting for.
 
 **Using cURL:**
 ```bash
-curl "http://localhost:8000/status/1"
+curl -X POST "http://localhost:8000/vote?candidate_id=1"
 ```
 
 **Expected Response:**
 ```json
 {
-  "task_id": 1,
-  "recipient": "john@example.com",
-  "current_state": "COMPLETED"
+  "status": "Vote Queued Successfully",
+  "candidate_id": 1
 }
 ```
 
@@ -107,23 +110,23 @@ curl "http://localhost:8000/status/1"
 
 ## 🗄️ Checking the Database Manually
 
-To verify the email tasks directly inside the PostgreSQL database, run these commands:
+To verify the candidates and their current vote counts directly inside the PostgreSQL database, run these commands:
 
 ```bash
 # 1. Access the PostgreSQL container interactively
-docker exec -it email_blaster_project-db-1 psql -U user -d logs_db
+docker exec -it vote_counter_project-db-1 psql -U user -d logs_db
 
-# 2. Run the SQL query to view saved tasks
-SELECT * FROM email_tasks;
+# 2. Run the SQL query to view candidates and their votes
+SELECT * FROM candidates;
 
 # 3. Type \q to exit the psql prompt
 ```
 
 You should see an output similar to this:
 ```text
- id |    recipient     |   message   |  status   
-----+------------------+-------------+-----------
-  1 | john@example.com | Hello World | COMPLETED
+ id | name  | votes 
+----+-------+-------
+  1 | Alice |    50
 ```
 
 <br>
@@ -132,6 +135,7 @@ You should see an output similar to this:
 
 - **Framework:** [FastAPI](https://fastapi.tiangolo.com/) (Extremely fast, modern web framework)
 - **Message Broker:** [RabbitMQ](https://www.rabbitmq.com/) (Handles high-volume queueing and reliable delivery)
+- **In-Memory Store / Lock:** [Redis](https://redis.io/) (Fast data store, acts as our distributed lock "Bouncer")
 - **Database:** [PostgreSQL](https://www.postgresql.org/) (Robust relational DB)
 - **ORM:** [SQLAlchemy](https://www.sqlalchemy.org/) (Database interactions)
 - **Containerization:** [Docker & Docker Compose](https://www.docker.com/) (Isolated and easy deployment)
